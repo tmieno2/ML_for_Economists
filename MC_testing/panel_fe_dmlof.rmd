@@ -1,0 +1,500 @@
+# Objective
+
+## Objective 1: Check if the following procedure works:
+
+1. Demean the dependent variable ($Y$) by regressing $Y$ on individual FEs and time FEs, and get residuals
+2. Apply causal machine learning methods using the residualized $Y$ as the dependent variable
+
+## Objective 2: Check if the following procedure works:
+
+1. Estimate FEs
+2. Apply causal machine learning methods using the estimated FEs as a control 
+
+
+# Conclusions
+
++ You cannot demean $y$ and apply machine learnig methods subsequently. This works only when the model is linear in parameter and specific functional forms are assumed, which is of course at odds with ML methods. 
++ But, you can find FEs and include it as a covariate. This works!
+
+# Set up
+
+## Packages
+```{r }
+
+# /*===========================================================
+#' # Preparation
+# /*===========================================================
+#* set up python environment
+library(reticulate)
+
+#* packages
+library(sp)
+library(grf)
+library(fixest)
+library(spdep)
+library(spatialreg)
+library(sf)
+library(raster)
+library(data.table)
+library(tidyverse)
+library(dplyr)
+library(magrittr)
+library(gstat)
+library(GWmodel)
+library(scam)
+library(mgcv)
+library(magic)
+library(stringr)
+library(ggplot2)
+library(tictoc)
+library(here)
+```
+
+## Other preparations 
+```{r }
+#* set working directory
+setwd(here())
+
+# source DML-OF-c
+source_python(here("MC_testing", "Python", "run_DML_OF_c.py"))
+source_python(here("MC_testing", "Python", "import_modules.py"))
+```
+
+# Single continuous treatment case
+
+## Data generating process
+$$y = abs(x) * W + \alpha_i + \phi_t + \mu$$
+
+```{r }
+N <- 200 #* number of individuals
+T <- 30 #* number of time perids
+
+data <-
+  CJ(
+    id = 1:N,
+    t = 1:T
+  ) %>%
+  #* indiv FE
+  .[, a_i := runif(1), by = id] %>%
+  #* year FE
+  .[, phi_t := runif(1), by = t] %>%
+  #* heterogeneity driver
+  .[, x := rnorm(.N)] %>%
+  #* treatment effect
+  .[, theta_x := abs(x)] %>%
+  #* treatment
+  .[, w := 3 * a_i + rnorm(.N)] %>%
+  #* error term
+  .[, e := rnorm(.N)] %>%
+  #* dependent var (error term has a_i)
+  .[, y := theta_x * w + 2 * a_i + e] %>%
+  .[, y_resid := feols(y ~ 1 | id + t, data = .)$residuals]
+
+fe_data <-
+  feols(y ~ 1 | id + t, data = data) %>%
+  fixef() %>%
+  .$id %>%
+  data.table(fe = .) %>%
+  .[, id := 1:N]
+
+data <- fe_data[data, on = "id"]
+
+dummies <-
+  fastDummies::dummy_cols(data, select_columns = "id") %>%
+  as.matrix() %>%
+  .[, -1]
+```
+
+## Causal Forest 
+
++ R-learner (DML): 
+
+```{r }
+Y <- data[, y] %>% as.matrix()
+W <- data[, w] %>% as.matrix()
+X <- data[, .(x, fe)] %>% as.matrix()
+# X <- data[, x] %>% as.matrix() %>% cbind(., dummies)
+
+macf_tau <- causal_forest(X, Y, W)
+
+theta_hat <- predict(macf_tau, newdata = X)
+
+data.table(
+  x = X[, 1],
+  tau = theta_hat[, 1]
+) %>%
+  ggplot(data = .) +
+  geom_point(aes(y = tau, x = x), size = 0.3) +
+  coord_equal() +
+  geom_abline(slope = 1, color = "red") +
+  geom_abline(slope = -1, color = "red")
+```
+
+## DML Orthogonal Forest
+
+```{r }
+# /*+++++++++++++++++++++++++++++++++++
+#' ## Define input data
+# /*+++++++++++++++++++++++++++++++++++
+Y <- data[, y] %>% as.matrix() #* dependent var
+X <- data[, x] %>% as.matrix() #* het impact driver
+T <- data[, w] %>% as.matrix()
+W <- data[, .(x, fe)] %>% as.matrix() #* controls
+X_test <-
+  seq(min(X), max(X), length = 50) %>%
+  as.matrix()
+
+
+#* Define some hyper parameters
+subsample_ratio <- 0.7
+# lambda_reg <- sqrt(log(ncol(W)) / (10 * subsample_ratio * nrow(Y)))
+
+# /*+++++++++++++++++++++++++++++++++++
+#' ## Estimation
+# /*+++++++++++++++++++++++++++++++++++
+#* estimate Doubly-Robus Orthogonal Forest
+dml_of_results <-
+  run_DML_OF_c(
+    Y = Y,
+    T = T,
+    X = X,
+    W = W,
+    X_test = X_test,
+    subsample_ratio = subsample_ratio
+  )
+
+data.table(
+  x = X_test[, 1],
+  tau = dml_of_results[, , 1]
+) %>%
+  ggplot(data = .) +
+  geom_point(aes(y = tau, x = x), size = 0.3) +
+  coord_equal() +
+  geom_abline(slope = 1, col = "red") +
+  geom_abline(slope = -1, col = "red")
+```
+
+# Continuous treatment: non-linear treatment effect
+
+## Data generating process
+
+$$y = \theta_1(x) * W + \theta_2(x) * W^2 + \alpha_i + \phi_t + \mu$$
+
++ $\theta_1(x) = x$
++ $\theta_2(x) = -0.1*x$
+
+```{r }
+N <- 300 #* number of individuals
+T <- 30 #* number of time perids
+
+data <-
+  CJ(
+    id = 1:N,
+    t = 1:T
+  ) %>%
+  #* indiv FE
+  .[, a_i := 4 * runif(1), by = id] %>%
+  #* year FE
+  .[, phi_t := runif(1), by = t] %>%
+  #* heterogeneity driver
+  .[, x := 5 * runif(.N)] %>%
+  #* treatment effect
+  .[, theta_x := abs(x)] %>%
+  #* treatment (correlated with a_i)
+  .[, w := a_i + 3 * runif(.N)] %>%
+  #* treatment (NOT correlated with a_i)
+  # .[, w := 5 * runif(.N)] %>%
+  #* error term
+  .[, e := 2 * rnorm(.N)] %>%
+  #* dependent var
+  .[, y := x * w - 0.1 * x * w^2 + a_i + phi_t + e] %>%
+  .[, y_resid := feols(y ~ 1 | id + t, data = .)$residuals]
+
+fe_data <-
+  feols(y ~ 1 | id + t, data = data) %>%
+  fixef() %>%
+  .$id %>%
+  data.table(fe = .) %>%
+  .[, id := 1:N]
+
+data <- fe_data[data, on = "id"]
+
+library(fastDummies)
+dummies <-
+  fastDummies::dummy_cols(data, select_columns = "id") %>%
+  as.matrix() %>%
+  .[, -1]
+```
+
+## Boosted Regression Forest (residualized $y$)
+
++ Use `y_resid` as the dependent variable: biased
+
+```{r }
+
+BRF_res <-
+  grf::boosted_regression_forest(
+    X = data[, .(x, w)] %>% as.matrix(),
+    Y = data[, y_resid],
+    num.trees = 1000,
+    min.node.size = 10
+    # tune.parameters = TRUE
+  )
+
+eval_data <-
+  CJ(
+    x = seq(min(data$x), max(data$x), length = 6),
+    w = seq(min(data$w), max(data$w), length = 50)
+  )
+
+brf_results <-
+  eval_data %>%
+  .[, y_hat := predict(BRF_res, newdata = .)] %>%
+  .[, y_true := x * w - 0.1 * x * w^2] %>%
+  .[, .(x, w, y_hat, y_true)] %>%
+  melt(id.var = c("x", "w")) %>%
+  .[, x := round(x, digits = 2)] %>%
+  .[, value := value - mean(value), by = .(variable, x)]
+
+ggplot(data = brf_results) +
+  geom_line(aes(y = value, x = w, color = variable)) +
+  facet_grid(. ~ x)
+```
+
+## Boosted Regression Forest (include FEs)
+
++ Use `y` and include whole bunch of dummies: biased
+
+```{r }
+
+X <-
+  data[, .(x, w, fe)] %>%
+  as.matrix()
+
+BRF_res <-
+  grf::boosted_regression_forest(
+    X = X,
+    Y = data[, y],
+    num.trees = 1000,
+    min.node.size = 10
+    # tune.parameters = TRUE
+  )
+
+eval_data <-
+  CJ(
+    x = seq(min(data$x), max(data$x), length = 6),
+    w = seq(min(data$w), max(data$w), length = 50)
+  ) %>%
+  .[, fe := data$fe[1]]
+
+brf_results <-
+  eval_data %>%
+  .[, y_hat := predict(BRF_res, newdata = .)] %>%
+  .[, y_true := x * w - 0.1 * x * w^2] %>%
+  .[, .(x, w, y_hat, y_true)] %>%
+  melt(id.var = c("x", "w")) %>%
+  .[, x := round(x, digits = 2)] %>%
+  .[, value := value - mean(value), by = .(variable, x)]
+
+ggplot(data = brf_results) +
+  geom_line(aes(y = value, x = w, color = variable)) +
+  facet_grid(. ~ x)
+```
+
+
+## DML-OF flexible treatment effect (`y_resid`)
+
+This does not work well.
+
+```{r }
+# /*+++++++++++++++++++++++++++++++++++
+#' ## Construct T matrix
+# /*+++++++++++++++++++++++++++++++++++
+#* gam set up
+gam_setup <- gam(y ~ s(w, k = 4, m = 2), data = data)
+
+#* construct T matrix
+T_mat <-
+  predict(gam_setup, data = data, type = "lpmatrix") %>%
+  #* get rid of the intercept
+  .[, -1]
+
+# /*+++++++++++++++++++++++++++++++++++
+#' ## Define input data
+# /*+++++++++++++++++++++++++++++++++++
+Y <- data[, y_resid] %>% as.matrix() #* dependent var
+# Y <- data[, y] %>% as.matrix() #* dependent var
+X <- data[, x] %>% as.matrix() #* het impact driver
+W <- X #* controls
+X_test <-
+  seq(min(X), max(X), length = 6) %>%
+  as.matrix()
+
+
+#* Define some hyper parameters
+subsample_ratio <- 0.7
+# lambda_reg <- sqrt(log(ncol(W)) / (10 * subsample_ratio * nrow(Y)))
+
+# /*+++++++++++++++++++++++++++++++++++
+#' ## Estimation
+# /*+++++++++++++++++++++++++++++++++++
+#* estimate Doubly-Robus Orthogonal Forest
+dml_of_results <-
+  run_DML_OF_c(
+    Y = Y,
+    T = T_mat,
+    X = X,
+    W = W,
+    X_test = X_test,
+    subsample_ratio = subsample_ratio
+  )
+
+# /*+++++++++++++++++++++++++++++++++++
+#' ## Estimate yield at various treatment levels
+# /*+++++++++++++++++++++++++++++++++++
+w_data <-
+  data.table(
+    w = quantile(
+      data$w,
+      prob = seq(0, 1, length = 100)
+    )
+  )
+
+eval_data <-
+  w_data %>%
+  predict(gam_setup, newdata = ., type = "lpmatrix") %>%
+  #* get rid of the intercept
+  .[, -1]
+
+#* \sum_{k=1}^3 \phi_k(t)\cdot \theta_k(x_1, x_2) at various values of t
+tw_hat <-
+  lapply(
+    1:ncol(eval_data),
+    function(x) {
+      (eval_data[, x] %>% as.matrix()) %*% t(dml_of_results[, , x] %>% as.matrix())
+    }
+  ) %>%
+  reduce(`+`) %>%
+  data.table() %>%
+  setnames(names(.), as.character(X_test[, 1])) %>%
+  .[, w := w_data$w] %>%
+  melt(id.var = "w") %>%
+  setnames(c("variable", "value"), c("x", "tw")) %>%
+  .[, x := as.numeric(as.character(x))] %>%
+  .[, type := "estimated"]
+
+tw_true <-
+  CJ(
+    x = as.numeric(as.character(X_test[, 1])),
+    w = w_data$w
+  ) %>%
+  .[, tw := x * w - 0.1 * x * w^2] %>%
+  .[, type := "true"]
+
+tw_data <-
+  rbind(tw_hat, tw_true) %>%
+  .[, group := .GRP, by = x] %>%
+  .[, tw := tw - mean(tw), by = .(group, type)]
+
+ggplot(data = tw_data) +
+  geom_line(aes(y = tw, x = w, color = type)) +
+  facet_grid(. ~ group)
+```
+
+## DML-OF flexible treatment effect (include FEs)
+
+```{r }
+# /*+++++++++++++++++++++++++++++++++++
+#' ## Construct T matrix
+# /*+++++++++++++++++++++++++++++++++++
+#* gam set up
+gam_setup <- gam(y ~ s(w, k = 4, m = 2), data = data)
+
+#* construct T matrix
+T_mat <-
+  predict(gam_setup, data = data, type = "lpmatrix") %>%
+  #* get rid of the intercept
+  .[, -1]
+
+# /*+++++++++++++++++++++++++++++++++++
+#' ## Define input data
+# /*+++++++++++++++++++++++++++++++++++
+Y <- data[, y] %>% as.matrix() #* dependent var
+# Y <- data[, y] %>% as.matrix() #* dependent var
+X <- data[, x] %>% as.matrix() #* het impact driver
+W <- data[, .(x, fe)] %>% as.matrix() #* controls
+X_test <-
+  seq(min(X), max(X), length = 6) %>%
+  as.matrix()
+
+
+#* Define some hyper parameters
+subsample_ratio <- 0.7
+# lambda_reg <- sqrt(log(ncol(W)) / (10 * subsample_ratio * nrow(Y)))
+
+# /*+++++++++++++++++++++++++++++++++++
+#' ## Estimation
+# /*+++++++++++++++++++++++++++++++++++
+#* estimate Doubly-Robus Orthogonal Forest
+dml_of_results <-
+  run_DML_OF_c(
+    Y = Y,
+    T = T_mat,
+    X = X,
+    W = W,
+    X_test = X_test,
+    subsample_ratio = subsample_ratio
+  )
+
+# /*+++++++++++++++++++++++++++++++++++
+#' ## Estimate yield at various treatment levels
+# /*+++++++++++++++++++++++++++++++++++
+w_data <-
+  data.table(
+    w = quantile(
+      data$w,
+      prob = seq(0, 1, length = 100)
+    )
+  )
+
+eval_data <-
+  w_data %>%
+  predict(gam_setup, newdata = ., type = "lpmatrix") %>%
+  #* get rid of the intercept
+  .[, -1]
+
+#* \sum_{k=1}^3 \phi_k(t)\cdot \theta_k(x_1, x_2) at various values of t
+tw_hat <-
+  lapply(
+    1:ncol(eval_data),
+    function(x) {
+      (eval_data[, x] %>% as.matrix()) %*% t(dml_of_results[, , x] %>% as.matrix())
+    }
+  ) %>%
+  reduce(`+`) %>%
+  data.table() %>%
+  setnames(names(.), as.character(X_test[, 1])) %>%
+  .[, w := w_data$w] %>%
+  melt(id.var = "w") %>%
+  setnames(c("variable", "value"), c("x", "tw")) %>%
+  .[, x := as.numeric(as.character(x))] %>%
+  .[, type := "estimated"]
+
+tw_true <-
+  CJ(
+    x = as.numeric(as.character(X_test[, 1])),
+    w = w_data$w
+  ) %>%
+  .[, tw := x * w - 0.1 * x * w^2] %>%
+  .[, type := "true"]
+
+tw_data <-
+  rbind(tw_hat, tw_true) %>%
+  .[, group := .GRP, by = x] %>%
+  .[, tw := tw - mean(tw), by = .(group, type)]
+
+ggplot(data = tw_data) +
+  geom_line(aes(y = tw, x = w, color = type)) +
+  facet_grid(. ~ group)
+```
+
