@@ -94,8 +94,11 @@ fe_data <-
   feols(y ~ 1 | id + t, data = data) %>%
   fixef() %>%
   .$id %>%
-  data.table(fe = .) %>%
-  .[, id := 1:N]
+  data.frame(
+    id = names(.) %>% as.numeric(),
+    fe = .
+  ) %>%
+  data.table()
 
 data <- fe_data[data, on = "id"]
 
@@ -214,8 +217,11 @@ fe_data <-
   feols(y ~ 1 | id + t, data = data) %>%
   fixef() %>%
   .$id %>%
-  data.table(fe = .) %>%
-  .[, id := 1:N]
+  data.frame(
+    id = names(.) %>% as.numeric(),
+    fe = .
+  ) %>%
+  data.table()
 
 data <- fe_data[data, on = "id"]
 
