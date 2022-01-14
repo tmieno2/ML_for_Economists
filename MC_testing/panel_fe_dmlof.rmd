@@ -196,7 +196,7 @@ data <-
     t = 1:T
   ) %>%
   #* indiv FE
-  .[, a_i := 4 * runif(1), by = id] %>%
+  .[, a_i := 1 + 3 * runif(1), by = id] %>%
   #* year FE
   .[, phi_t := runif(1), by = t] %>%
   #* heterogeneity driver
