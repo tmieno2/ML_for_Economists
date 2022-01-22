@@ -1,0 +1,213 @@
+---
+title: "Double Machine Learning"
+author: "Machine Learning for Economists"
+output:
+  xaringan::moon_reader:
+    # css: [default, metropolis, metropolis-fonts] 
+    css: ../xaringan-themer.css 
+    lib_dir: libs
+    nature:
+      ratio: 12:8
+      highlightStyle: github
+      highlightLines: true
+      countIncrementalSlides: false
+bibliography: ../ref.bib
+---
+class: middle
+
+```{r, child = "../setup.Rmd"}
+```
+
+```{r knitr-setup, include = FALSE, cache = F}
+library(knitr)
+opts_chunk$set(
+  echo = F,
+  root.dir = here()
+)
+```
+
+```{r prep, include = FALSE, cache = F}
+library(data.table)
+library(magick)
+library(fixest)
+library(officer)
+library(flextable)
+library(dplyr)
+library(ggplot2)
+```
+
+
+# Outline
+
+1. [Theoretical Framework](#theory)
+2. [Estimation](#est)
+
+---
+
+class: inverse, center, middle
+name: theory
+
+# Framework
+
+<html><div style='float:left'></div><hr color='#EB811B' size=1px width=1000px></html>
+
+---
+class: middle
+
+# Framework
+
+$$
+\begin{aligned}
+Y & = \theta(X)\cdot T + g(X, W) + \varepsilon \\
+T & = f(X, W) + \eta 
+\end{aligned}
+$$
+
+.content-box-green[**Assumptions**]
+
++ $E[\varepsilon|X, W] = 0$
++ $E[\eta|X, W] = 0$
++ $E[\eta\cdot\varepsilon|X, W] = 0$
+
+.content-box-green[**Objective**]
+
+Estimate the <span style = "color: red;"> constant </span> marginal CATE $\theta(X)$. (constant in the sense marginal CATE is the same irrespective of the value of the treatment)
+
+.content-box-green[**Important**]
+
+No functional form or structural assumptions are made for $f()$ and $g()$.
+
+---
+class: middle
+
+Under the assumptions,
+
+$$
+\begin{aligned}
+E[Y|X, W] = \theta(X)\cdot E[T|X,W] + g(X,W)
+\end{aligned}
+$$
+
+Thus,
+
+$$
+\begin{aligned}
+Y & = \theta(X)\cdot T + g(X,W) + \varepsilon \\
+\Rightarrow Y - E[Y|X, W] & = \theta(X)\cdot T + g(X,W) + \varepsilon - \theta(X)\cdot E[T|X,W] - g(X,W) \\
+\Rightarrow Y - E[Y|X, W] & = \theta(X)\cdot (T - E[T|X,W]) + \varepsilon \\
+\end{aligned}
+$$
+
+---
+class: middle
+
+$$
+\begin{aligned}
+Y - E[Y|X, W] & = \theta(X)\cdot (T - E[T|X,W]) + \varepsilon 
+\end{aligned}
+$$ 
+
+Suppose we know $E[Y|X, W]$ and $E[T|X,W]$, then we can construct the following new variables:
+
++ $\tilde{Y} = Y - E[Y|X, W]$
++ $\tilde{T} = T - E[T|X, W] = \eta$
+
+Then, the problem of identifying $\theta(X)$ reduces to the following model:
+
+$$
+\begin{aligned}
+\tilde{Y} = \theta(X)\cdot \tilde{T} + \varepsilon
+\end{aligned}
+$$
+
+---
+class: middle
+
+Since $E[\eta\cdot\varepsilon|X] = 0$ by assumption, we can regress $\tilde{Y}$ on $X$ and $\tilde{T}$,
+
+$$
+\begin{aligned}
+\hat{\theta} = argmin_{\theta} \;\; E[(\tilde{Y} - \theta(X)\cdot \tilde{T})^2]
+\end{aligned}
+$$
+
+---
+class: middle
+
+# Steps
+
+.content-box-green[**Step 1**]
+
++ Estiamate $E[Y|X, W]$ and $E[T|X, W]$ with <span style = "color: red;"> your </span> choice of methods. 
++ You can use any methods here. Machine learning methods allow you to estimate them without assuming any functional form or structural assumptions.
+
+.content-box-green[**Step 2**]
+
+Subtract the fitted values in the first stage to residualize $Y$ and $T$
+
+$\hat{\tilde{Y}} = Y - \hat{f}(X,W)$
+
+$\hat{\tilde{T}} = T - \hat{g}(X,W)$
+
+---
+class: middle
+
+# Steps
+
+.content-box-green[**Step 3**]
+
++ Estimate $\tilde{Y} = \theta(X)\cdot \tilde{T} + \varepsilon$ using the $\hat{\tilde{Y}}$, $\hat{\tilde{T}}$, and $X$. 
++ You have vairous options here as well
+  + Linear model where $\theta(X)$ is assumed to be of particular functional form 
+  + Non-parametric estimation where no functional form and structural assumptions are made for $\theta(X)$
+
+---
+class: middle
+
+# So, what is the point?
+
+
+---
+
+class: inverse, center, middle
+name: theory
+
+# Estimation using Python
+
+<html><div style='float:left'></div><hr color='#EB811B' size=1px width=1000px></html>
+
+---
+class: middle
+
+# DML
+
+.content-box-green[**Set up estimation**]
+
+```{python eval = F, echo = TRUE}
+from econml.dml import DML
+from sklearn.linear_model import LassoCV
+from sklearn.ensemble import GradientBoostingRegressor
+est = DML(model_y=GradientBoostingRegressor(),
+          model_t=GradientBoostingRegressor(),
+          model_final=LassoCV(fit_intercept=False))
+```
+
+The python object `est` holds a set of rules that it would follow once data is provide for estimation.
+
++ `model_y`: how to estimate $f(X, W)$ $(E[Y| X, W])$ (Step 1)
++ `model_t`: how to estimate $g(X, W)$ $(E[T| X, W])$ (Step 1)
++ `model_final`: how to estimate the final model: $\tilde{Y} = \theta(X)\cdot \tilde{T} + \varepsilon$ (Step 3)
+
+---
+class: middle
+
+# LinearDML
+
+```{python eval = F, echo = T}
+est = LinearDML()
+est.fit(y, T, X=X, W=W)
+point = est.effect(X, T0=T0, T1=T1)
+lb, ub = est.effect_interval(X, T0=T0, T1=T1, alpha=0.05)
+```
+
+ 
